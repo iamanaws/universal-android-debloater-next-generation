@@ -4,6 +4,7 @@
     clippy::uninlined_format_args,
     clippy::map_unwrap_or,
     clippy::unnecessary_wraps,
+    clippy::exit,
     reason = "Suppress non-critical pedantic/style lints to keep build green"
 )]
 

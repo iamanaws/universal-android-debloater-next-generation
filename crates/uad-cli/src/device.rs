@@ -5,7 +5,6 @@ pub fn get_target_device(device: Option<String>) -> Result<Phone, Box<dyn std::e
     let devices = get_devices_list();
 
     if devices.is_empty() {
-        eprintln!("Error: No devices found");
         return Err("No devices found".into());
     }
 

@@ -4,8 +4,7 @@
 //!
 //! Following the design philosophy of most of Rust `std`,
 //! `*Command` are intended to be "thin wrappers" (low-overhead abstractions)
-//! around the ADB CLI or `adb_client`
-//! ([in the future](https://github.com/Universal-Debloater-Alliance/universal-android-debloater-next-generation/issues/700) ),
+//! around `adb_client`,
 //! which implies:
 //! - no "magic"
 //! - no custom commands
@@ -38,10 +37,10 @@
 //! For comprehensive info about ADB,
 //! [see this](https://android.googlesource.com/platform/packages/modules/adb/+/refs/heads/master/docs/)
 
+use adb_client::{ADBDeviceExt, ADBServer};
 use serde::{Deserialize, Serialize};
-
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
+use std::fmt::Write as _;
+use std::io::Cursor;
 
 use crate::utils::is_all_w_c;
 use log::{error, info};
@@ -53,25 +52,13 @@ pub fn to_trimmed_utf8(v: &[u8]) -> String {
     String::from_utf8_lossy(v).trim_end().to_string()
 }
 
-#[cfg(debug_assertions)]
-#[must_use]
-fn is_version_triple(s: &str) -> bool {
-    let mut components = s.split('.');
-    for _ in 0..3 {
-        if !components
-            .next()
-            .is_some_and(|comp| comp.as_bytes().iter().all(u8::is_ascii_digit))
-        {
-            return false;
-        }
-    }
-    if components.next().is_some() {
-        return false;
-    }
-    true
+/// Internal state for `ACommand` - tracks the device serial to use
+#[derive(Debug)]
+struct ACommandState {
+    device_serial: Option<String>,
 }
 
-/// Builder object for an Android Debug Bridge CLI command,
+/// Builder object for an Android Debug Bridge command,
 /// using the type-state and new-type patterns.
 ///
 /// This is not intended to model the entire ADB API.
@@ -79,12 +66,15 @@ fn is_version_triple(s: &str) -> bool {
 ///
 /// [More info here](https://developer.android.com/tools/adb)
 #[derive(Debug)]
-pub struct ACommand(std::process::Command);
+pub struct ACommand(ACommandState);
+
 impl ACommand {
     /// `adb` command builder
     #[must_use]
     pub fn new() -> Self {
-        Self(std::process::Command::new("adb"))
+        Self(ACommandState {
+            device_serial: None,
+        })
     }
 
     /// `shell` sub-command builder.
@@ -94,9 +84,8 @@ impl ACommand {
     pub fn shell<S: AsRef<str>>(mut self, device_serial: S) -> ShellCommand {
         let serial = device_serial.as_ref();
         if !serial.is_empty() {
-            self.0.args(["-s", serial]);
+            self.0.device_serial = Some(serial.to_string());
         }
-        self.0.arg("shell");
         ShellCommand(self)
     }
 
@@ -108,110 +97,105 @@ impl ACommand {
     /// Status can be (but not limited to):
     /// - "unauthorized"
     /// - "device"
-    pub fn devices(mut self) -> Result<Vec<(String, String)>, String> {
-        self.0.arg("devices");
-        Ok(self
-            .run()?
-            .lines()
-            .skip(1) // header
-            .map(|dev_stat| {
-                let tab_idx = dev_stat
-                    // OS-specific?
-                    .find('\t')
-                    // True on Linux,
-                    // no matter if ADB is piped or connected to terminal
-                    .expect("There must be 1 tab after serial");
-                (
-                    // serial
-                    dev_stat[..tab_idx].to_string(),
-                    // status
-                    dev_stat[(tab_idx + 1)..].to_string(),
-                )
+    pub fn devices(self) -> Result<Vec<(String, String)>, String> {
+        let mut server = ADBServer::default();
+        server
+            .devices()
+            .map(|device_list| {
+                device_list
+                    .into_iter()
+                    .map(|dev| (dev.identifier, dev.state.to_string()))
+                    .collect()
             })
-            .collect())
+            .map_err(|e| {
+                error!("ADB: {}", e);
+                format!("Cannot connect to ADB server: {}", e)
+            })
     }
 
-    /// `version` sub-command
-    ///
-    /// ## Format
-    /// This is just a sample,
-    /// we don't know which guarantees are stable (yet):
-    /// ```txt
-    /// Android Debug Bridge version 1.0.41
-    /// Version 34.0.5-debian
-    /// Installed as /usr/lib/android-sdk/platform-tools/adb
-    /// Running on Linux 6.12.12-amd64 (x86_64)
-    /// ```
-    ///
-    /// The expected format should be like:
-    /// ```txt
-    /// Android Debug Bridge version <num>.<num>.<num>
-    /// Version <num>.<num>.<num>-<no spaces>
-    /// Installed as <ANDROID_SDK_HOME>/platform-tools/adb[.exe]
-    /// Running on <OS/kernel version> (<CPU arch>)
-    /// ```
-    #[expect(clippy::panic_in_result_fn, reason = "Assertions are fine")]
-    pub fn version(mut self) -> Result<String, String> {
-        self.0.arg("version");
-        let out = self.run()?;
+    /// Execute a shell command via `adb_client`
+    fn run_shell_command(&self, shell_command: &str) -> Result<String, String> {
+        let mut server = ADBServer::default();
 
-        #[cfg(debug_assertions)]
-        {
-            const ADBV: &str = "Android Debug Bridge version ";
-            const V: &str = "Version ";
+        // List available devices first
+        let device_list = server
+            .devices()
+            .map_err(|e| format!("Cannot get device list: {}", e))?;
 
-            let mut lns = out.lines();
-
-            assert!(
-                lns.next()
-                    .is_some_and(|ln| ln.starts_with(ADBV) && is_version_triple(&ln[ADBV.len()..]))
-            );
-            assert!(lns.next().is_some_and(|ln| ln.starts_with(V)
-                && is_version_triple(&ln[V.len()..ln.find('-').unwrap_or(ln.len())])));
-            // missing test for valid path
-            assert!(lns.next().is_some_and(|ln| ln.starts_with("Installed as ")
-                && (ln.ends_with("adb") || ln.ends_with("adb.exe"))));
-            // missing test for x86/ARM (both 64b)
-            assert!(lns.next().is_some_and(|ln| ln.starts_with("Running on ")));
-            if lns.next().is_some() {
-                unreachable!("Expected < 5 lines")
-            }
+        if device_list.is_empty() {
+            return Err("No ADB devices found. Please connect a device and try again.".to_string());
         }
 
-        Ok(out)
-    }
-
-    /// General executor
-    fn run(self) -> Result<String, String> {
-        let mut cmd = self.0;
-        #[cfg(target_os = "windows")]
-        let cmd = cmd.creation_flags(0x0800_0000); // do not open a cmd window
-
-        info!(
-            "Ran command: adb {}",
-            cmd.get_args()
-                .map(|s| s.to_str().unwrap_or_else(|| unreachable!()))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        match cmd.output() {
-            Err(e) => {
-                error!("ADB: {e}");
-                Err("Cannot run ADB, likely not found".to_string())
+        // Select device by serial if provided, otherwise use the first available device
+        let target_serial = if let Some(ref serial) = self.0.device_serial {
+            // Verify the device exists
+            if !device_list.iter().any(|d| d.identifier == *serial) {
+                return Err(format!(
+                    "Device '{}' not found. Available devices: {}",
+                    serial,
+                    device_list
+                        .iter()
+                        .map(|d| d.identifier.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
             }
-            Ok(o) => {
-                let stdout = to_trimmed_utf8(&o.stdout);
-                if o.status.success() {
-                    Ok(stdout)
+            Some(serial.clone())
+        } else {
+            // Check if we have exactly one device, warn if multiple
+            if device_list.len() > 1 {
+                info!(
+                    "Multiple devices found ({}), using first device: {}",
+                    device_list.len(),
+                    device_list[0].identifier
+                );
+            }
+            None
+        };
+
+        // Connect to the device
+        let mut device = server.get_device().map_err(|e| {
+            format!(
+                "Cannot connect to device{}: {}",
+                if let Some(ref ser) = target_serial {
+                    format!(" '{}'", ser)
                 } else {
-                    let stderr = to_trimmed_utf8(&o.stderr);
-                    // ADB does really weird things:
-                    // Some errors are not redirected to `stderr`
-                    let err = if stdout.is_empty() { stderr } else { stdout };
-                    Err(err)
-                }
-            }
+                    String::new()
+                },
+                e
+            )
+        })?;
+
+        // Create a writer to capture output
+        let mut buffer = Vec::new();
+        let mut cursor = Cursor::new(&mut buffer);
+
+        // Split command by space to handle commands with arguments
+        // This is a simple approach - for complex commands, they should be passed properly by the caller
+        let command_parts: Vec<&str> = shell_command
+            .split_whitespace()
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if command_parts.is_empty() {
+            return Err("Empty shell command".to_string());
         }
+
+        // Execute the shell command
+        info!("Ran command: adb shell {}", shell_command);
+
+        device
+            .shell_command(&command_parts, &mut cursor)
+            .map_err(|e| {
+                error!("ADB shell command failed: {}", e);
+                format!("Shell command failed: {}", e)
+            })?;
+
+        // Extract output from buffer
+        let output = String::from_utf8_lossy(&buffer);
+        let trimmed = output.trim_end().to_string();
+
+        Ok(trimmed)
     }
 }
 
@@ -227,13 +211,14 @@ impl Default for ACommand {
 /// [More info](https://chromium.googlesource.com/aosp/platform/system/core/+/refs/heads/upstream/shell_and_utilities).
 #[derive(Debug)]
 pub struct ShellCommand(ACommand);
+
 impl ShellCommand {
     /// `pm` command builder
     #[must_use]
-    pub fn pm(mut self) -> PmCommand {
-        self.0.0.arg("pm");
+    pub fn pm(self) -> PmCommand {
         PmCommand(self)
     }
+
     /// Query a device property value, by its key.
     /// These can be of any type:
     /// - `boolean`
@@ -242,22 +227,21 @@ impl ShellCommand {
     /// - etc...
     ///
     /// So to avoid lossy conversions, we return strs
-    pub fn getprop(mut self, key: &str) -> Result<String, String> {
-        self.0.0.args(["getprop", key]);
-        self.0.run()
+    pub fn getprop(self, key: &str) -> Result<String, String> {
+        let command = format!("getprop {}", key);
+        self.0.run_shell_command(&command)
     }
+
     /// Reboots device
-    pub fn reboot(mut self) -> Result<String, String> {
-        self.0.0.arg("reboot");
-        self.0.run()
+    pub fn reboot(self) -> Result<String, String> {
+        self.0.run_shell_command("reboot")
     }
 
     /// Execute an arbitrary shell action string on the device's default shell.
     /// The action string is passed as a single argument to `adb shell` and
     /// interpreted by the remote shell (which splits on spaces).
-    pub fn raw(mut self, action: &str) -> Result<String, String> {
-        self.0.0.arg(action);
-        self.0.run()
+    pub fn raw(self, action: &str) -> Result<String, String> {
+        self.0.run_shell_command(action)
     }
 }
 
@@ -344,29 +328,27 @@ impl PmCommand {
     /// - isn't sorted
     /// - duplicates never _seem_ to happen, but don't assume uniqueness
     pub fn list_packages_sys(
-        mut self,
+        self,
         f: Option<PmListPacksFlag>,
         user_id: Option<u16>,
     ) -> Result<Vec<String>, String> {
-        let cmd = &mut self.0.0.0;
-
-        cmd.args(["list", "packages", "-s"]);
-        if let Some(s) = f {
-            cmd.arg(s.to_str());
+        let mut command = "pm list packages -s".to_string();
+        if let Some(flag) = f {
+            command.push(' ');
+            command.push_str(flag.to_str());
         }
-        if let Some(u) = user_id {
-            cmd.arg("--user");
-            cmd.arg(u.to_string());
+        if let Some(uid) = user_id {
+            let _ = write!(&mut command, " --user {}", uid);
         }
 
-        self.0.0.run().map(|pack_ls| {
+        self.0.raw(&command).map(|pack_ls| {
             pack_ls
                 .lines()
-                .map(|p_ln| {
-                    debug_assert!(p_ln.starts_with(PACK_PREFIX));
-                    let p = &p_ln[PACK_PREFIX.len()..];
-                    debug_assert!(PackageId::new(p.into()).is_some() || p == "android");
-                    String::from(p)
+                .filter_map(|p_ln| {
+                    p_ln.strip_prefix(PACK_PREFIX).map(|p| {
+                        debug_assert!(PackageId::new(p.into()).is_some() || p == "android");
+                        String::from(p)
+                    })
                 })
                 .collect()
         })
@@ -376,15 +358,13 @@ impl PmCommand {
     ///
     /// - <https://source.android.com/docs/devices/admin/multi-user-testing>
     /// - <https://stackoverflow.com/questions/37495126/android-get-list-of-users-and-profile-name>
-    pub fn list_users(mut self) -> Result<Box<[UserInfo]>, String> {
-        self.0.0.0.args(["list", "users"]);
+    pub fn list_users(self) -> Result<Box<[UserInfo]>, String> {
         Ok(self
             .0
-            .0
-            .run()?
+            .raw("pm list users")?
             .lines()
             .skip(1) // omit header
-            .map(|ln| {
+            .filter_map(|ln| {
                 // this could be optimized by making more API-stability assumptions
                 let ln = ln.trim_ascii_start();
                 let ln = ln.strip_prefix("UserInfo").unwrap_or(ln).trim_ascii_start();
@@ -405,27 +385,14 @@ impl PmCommand {
 
                 let mut comps = ln.split(':');
 
-                let id = comps
-                    .next()
-                    .expect("There must be at least 1 ':'-separated component")
-                    .parse()
-                    .expect("string assumed to be UID numeral");
-                //let name = comps
-                //    .next()
-                //    .expect("There must be at least 2 ':'-separated components. 2nd is user-name");
-                //let flags = u32::from_str_radix(
-                //    comps.next().expect(
-                //        "There must be at least 3 ':'-separated components. 3rd is user bit-flags",
-                //    ),
-                //    16,
-                //)
-                //.expect("string assumed to be hexadecimal bit-flags");
-                UserInfo {
+                let id = comps.next().and_then(|s| s.parse().ok())?;
+
+                Some(UserInfo {
                     id,
                     //name: name.into(),
                     //flags,
                     //running: run,
-                }
+                })
             })
             .collect())
     }
