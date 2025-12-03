@@ -2,7 +2,7 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::collections::HashMap;
 use std::io::Write;
-use uad_core::adb::ACommand;
+use uad_core::adb::{ACommand, AdbBackend};
 use uad_core::sync::{CorePackage, Phone, User, apply_pkg_state_commands, get_package_state};
 use uad_core::uad_lists::{Package, PackageState, Removal, UadList, load_debloat_lists};
 
@@ -13,13 +13,15 @@ use crate::println_or_exit;
 
 /// Start interactive REPL mode
 pub fn repl_mode(
+    backend: AdbBackend,
     device: Option<String>,
     user_id: Option<u16>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Universal Android Debloater - Interactive Mode");
+    println!("Using {} ADB backend", backend);
     println!("Type 'help' for available commands, 'exit' or 'quit' to leave\n");
 
-    let target_device = get_target_device(device)?;
+    let target_device = get_target_device(backend, device)?;
     let user = get_user(&target_device, user_id)?;
 
     println!(
@@ -41,9 +43,15 @@ pub fn repl_mode(
         let readline = rl.readline("uad> ");
         match readline {
             Ok(line) => {
-                if let Err(e) =
-                    handle_repl_line(&line, &mut rl, &target_device, user, user_id, &uad_lists)
-                {
+                if let Err(e) = handle_repl_line(
+                    &line,
+                    &mut rl,
+                    &target_device,
+                    user,
+                    user_id,
+                    &uad_lists,
+                    backend,
+                ) {
                     if e.to_string() == "exit" {
                         break;
                     }
@@ -84,6 +92,7 @@ fn handle_repl_line(
     user: User,
     user_id: Option<u16>,
     uad_lists: &HashMap<String, Package>,
+    backend: AdbBackend,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let line = line.trim();
     if line.is_empty() {
@@ -104,7 +113,7 @@ fn handle_repl_line(
             return Err("exit".into());
         }
         "list" | "ls" => {
-            handle_list_command(&parts[1..], device, user_id, uad_lists)?;
+            handle_list_command(&parts[1..], device, user_id, uad_lists, backend)?;
         }
         "info" => {
             handle_info_command(&parts[1..], device, uad_lists)?;
@@ -141,8 +150,8 @@ fn handle_repl_line(
         }
         "device" => {
             println!(
-                "Device: {} ({}), Android SDK: {}, User: {}",
-                device.model, device.adb_id, device.android_sdk, user.id
+                "Device: {} ({}), Android SDK: {}, User: {}, Backend: {}",
+                device.model, device.adb_id, device.android_sdk, user.id, backend
             );
         }
         "clear" => {
@@ -212,11 +221,12 @@ fn handle_list_command(
     device: &Phone,
     user_id: Option<u16>,
     uad_lists: &HashMap<String, Package>,
+    backend: AdbBackend,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let parsed = ReplListArgs::parse(args)?;
 
     let pm_flag = parsed.state_filter.and_then(StateFilter::to_pm_flag);
-    let system_packages = ACommand::new()
+    let system_packages = ACommand::with_backend(backend)
         .shell(&device.adb_id)
         .pm()
         .list_packages_sys(pm_flag, user_id)?;
