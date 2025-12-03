@@ -1,5 +1,6 @@
 use crate::CACHE_DIR;
 use crate::CONFIG_DIR;
+use crate::adb::AdbBackend;
 use crate::utils::DisplayablePath;
 use crate::{sync::User, theme::Theme};
 use log::error;
@@ -20,6 +21,9 @@ pub struct GeneralSettings {
     pub theme: String,
     pub expert_mode: bool,
     pub backup_folder: PathBuf,
+    /// ADB backend to use: Builtin (no external dependencies) or System (uses installed adb)
+    #[serde(default)]
+    pub adb_backend: AdbBackend,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -47,6 +51,7 @@ impl Default for GeneralSettings {
             theme: Theme::default().to_string(),
             expert_mode: false,
             backup_folder: CACHE_DIR.join("backups"),
+            adb_backend: AdbBackend::default(),
         }
     }
 }

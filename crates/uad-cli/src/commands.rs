@@ -2,7 +2,7 @@ use clap::CommandFactory;
 use clap_complete::{Shell, generate};
 use std::collections::HashMap;
 use std::io::Write;
-use uad_core::adb::ACommand;
+use uad_core::adb::{ACommand, AdbBackend, PmListPacksFlag};
 use uad_core::sync::{
     CorePackage, Phone, User, apply_pkg_state_commands, get_devices_list, get_package_state,
     run_adb_shell_action,
@@ -15,13 +15,17 @@ use crate::filters::{ListFilter, RemovalFilter, StateFilter};
 use crate::{Cli, print_or_exit, println_or_exit};
 
 /// List all connected Android devices
-pub fn list_devices() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Scanning for connected devices...");
-    let devices = get_devices_list();
+pub fn list_devices(backend: AdbBackend) -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "Scanning for connected devices (using {} backend)...",
+        backend
+    );
+    let devices = get_devices_list(backend);
 
     if devices.is_empty() {
-        eprintln!("No devices found. Make sure ADB is installed and devices are connected.");
-        return Err("No devices found".into());
+        return Err(
+            "No devices found. Connect a device with USB debugging enabled and authorized.".into(),
+        );
     }
 
     println!("\nFound {} device(s):\n", devices.len());
@@ -93,8 +97,29 @@ pub struct DisplayConfig {
     pub show_removal: bool,
 }
 
+#[inline]
+fn resolve_pm_flag(state_filter: Option<StateFilter>) -> Option<PmListPacksFlag> {
+    match state_filter {
+        Some(StateFilter::Enabled | StateFilter::Disabled) => {
+            state_filter.and_then(StateFilter::to_pm_flag)
+        }
+        _ => Some(PmListPacksFlag::IncludeUninstalled),
+    }
+}
+
+#[inline]
+fn state_matches(filter: Option<StateFilter>, state: PackageState) -> bool {
+    match filter {
+        None | Some(StateFilter::All) => true,
+        Some(StateFilter::Enabled) => state == PackageState::Enabled,
+        Some(StateFilter::Disabled) => state == PackageState::Disabled,
+        Some(StateFilter::Uninstalled) => state == PackageState::Uninstalled,
+    }
+}
+
 /// List packages on a device with filtering
 pub fn list_packages(
+    backend: AdbBackend,
     device: Option<String>,
     state_filter: Option<StateFilter>,
     removal_filter: Option<RemovalFilter>,
@@ -102,7 +127,7 @@ pub fn list_packages(
     search: Option<String>,
     user_id: Option<u16>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let target_device = get_target_device(device)?;
+    let target_device = get_target_device(backend, device)?;
     let uad_lists = load_debloat_lists(false).unwrap_or_else(|lists| lists);
 
     println_or_exit!(
@@ -118,8 +143,8 @@ pub fn list_packages(
         search,
     };
 
-    let pm_flag = state_filter.and_then(StateFilter::to_pm_flag);
-    let system_packages = ACommand::new()
+    let pm_flag = resolve_pm_flag(state_filter);
+    let system_packages = ACommand::with_backend(backend)
         .shell(&target_device.adb_id)
         .pm()
         .list_packages_sys(pm_flag, user_id)?;
@@ -161,6 +186,11 @@ pub fn display_package_list(
 
         let pkg_state =
             get_package_state(device_serial, pkg_name, user_id).unwrap_or(PackageState::Enabled);
+
+        // Apply state filter after retrieving actual state
+        if !state_matches(context.state_filter, pkg_state) {
+            continue;
+        }
 
         display_package_entry(pkg_name, pkg_info, pkg_state, &config);
         displayed_count += 1;
@@ -210,6 +240,7 @@ pub fn display_package_entry(
 
 /// Change the state of one or more packages
 pub fn change_package_state(
+    backend: AdbBackend,
     packages: &[String],
     device: Option<String>,
     user_id: Option<u16>,
@@ -218,11 +249,10 @@ pub fn change_package_state(
     action_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if packages.is_empty() {
-        eprintln!("Error: No packages specified");
         return Err("No packages specified".into());
     }
 
-    let target_device = get_target_device(device)?;
+    let target_device = get_target_device(backend, device)?;
     let user = get_user(&target_device, user_id)?;
     let uad_lists = load_debloat_lists(false).unwrap_or_else(|lists| lists);
 
@@ -332,8 +362,7 @@ pub fn execute_with_fallback(
         match run_adb_shell_action(&device.adb_id, cmd.as_str()) {
             Ok(_) => println!("{}✓ {}", indent, cmd),
             Err(e) => {
-                eprintln!("{}✗ Failed: {:?}", indent, e);
-                return Err(format!("Failed to execute: {}", cmd).into());
+                return Err(format!("Failed to execute: {} ({:?})", cmd, e).into());
             }
         }
     }
@@ -378,6 +407,7 @@ pub fn execute_with_fallback(
 
 /// Show detailed information about a package
 pub fn show_package_info(
+    backend: AdbBackend,
     package: &str,
     device: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -396,7 +426,7 @@ pub fn show_package_info(
     }
 
     if let Some(device_id) = device {
-        let target_device = get_target_device(Some(device_id))?;
+        let target_device = get_target_device(backend, Some(device_id))?;
         println!("Device: {} ({})", target_device.model, target_device.adb_id);
 
         let state = get_package_state(&target_device.adb_id, package, None)
@@ -416,10 +446,7 @@ pub fn update_lists() -> Result<(), Box<dyn std::error::Error>> {
             println!("✓ Successfully updated package lists");
             Ok(())
         }
-        Err(_lists) => {
-            eprintln!("✗ Failed to update lists from remote, using cached version");
-            Err("Failed to update lists".into())
-        }
+        Err(_lists) => Err("✗ Failed to update lists from remote, using cached version".into()),
     }
 }
 
@@ -428,4 +455,20 @@ pub fn generate_completions(shell: Shell) {
     let mut cmd = Cli::command();
     let name = cmd.get_name().to_string();
     generate(shell, &mut cmd, name, &mut std::io::stdout());
+}
+
+/// Show ADB backend and version information
+pub fn show_adb_info(backend: AdbBackend) -> Result<(), Box<dyn std::error::Error>> {
+    println!("ADB Backend: {}\n", backend);
+
+    match ACommand::with_backend(backend).version() {
+        Ok(version) => {
+            println!("{version}");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Failed to get ADB version: {e}");
+            Err(e.into())
+        }
+    }
 }

@@ -16,6 +16,7 @@ gui = ["dep:iced", "dep:dark-light"]
 self-update = ["dep:flate2", "dep:tar"]
 
 [dependencies]
+adb_client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
