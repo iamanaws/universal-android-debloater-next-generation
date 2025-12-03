@@ -1,11 +1,14 @@
+use uad_core::adb::AdbBackend;
 use uad_core::sync::{Phone, User, get_devices_list};
 
 /// Get target device, either by serial or first available
-pub fn get_target_device(device: Option<String>) -> Result<Phone, Box<dyn std::error::Error>> {
-    let devices = get_devices_list();
+pub fn get_target_device(
+    backend: AdbBackend,
+    device: Option<String>,
+) -> Result<Phone, Box<dyn std::error::Error>> {
+    let devices = get_devices_list(backend);
 
     if devices.is_empty() {
-        eprintln!("Error: No devices found");
         return Err("No devices found".into());
     }
 
