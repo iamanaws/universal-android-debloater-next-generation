@@ -4,11 +4,13 @@
     clippy::uninlined_format_args,
     clippy::map_unwrap_or,
     clippy::unnecessary_wraps,
+    clippy::exit,
     reason = "Suppress non-critical pedantic/style lints to keep build green"
 )]
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
+use uad_core::adb::AdbBackend;
 use uad_core::uad_lists::PackageState;
 
 mod commands;
@@ -19,12 +21,40 @@ mod repl;
 
 use filters::{ListFilter, RemovalFilter, StateFilter};
 
+/// CLI-compatible ADB backend selection
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AdbBackendArg {
+    /// Built-in ADB implementation (no external dependencies)
+    Builtin,
+    /// Use system-installed adb binary
+    System,
+}
+
+impl From<AdbBackendArg> for AdbBackend {
+    fn from(arg: AdbBackendArg) -> Self {
+        match arg {
+            AdbBackendArg::Builtin => AdbBackend::Builtin,
+            AdbBackendArg::System => AdbBackend::System,
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "uad")]
 #[command(about = "Universal Android Debloater - Command Line Interface", long_about = None)]
 #[command(version)]
 #[command(propagate_version = true)]
 pub struct Cli {
+    /// ADB backend to use: builtin (default, no dependencies) or system (uses adb binary)
+    #[arg(
+        short = 'B',
+        long = "backend",
+        value_enum,
+        global = true,
+        default_value = "builtin"
+    )]
+    backend: AdbBackendArg,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -135,6 +165,9 @@ enum Commands {
     /// Update UAD package lists from remote repository
     Update,
 
+    /// Show ADB backend and version information
+    Adb,
+
     /// Generate shell completion script
     Completions {
         /// Shell to generate completions for
@@ -158,10 +191,11 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let backend: AdbBackend = cli.backend.into();
 
     match cli.command {
         Commands::Devices => {
-            commands::list_devices()?;
+            commands::list_devices(backend)?;
         }
         Commands::List {
             device,
@@ -171,7 +205,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             search,
             user,
         } => {
-            commands::list_packages(device, state, removal, list, search, user)?;
+            commands::list_packages(backend, device, state, removal, list, search, user)?;
         }
         Commands::Uninstall {
             packages,
@@ -180,6 +214,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dry_run,
         } => {
             commands::change_package_state(
+                backend,
                 &packages,
                 device,
                 user,
@@ -195,6 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dry_run,
         } => {
             commands::change_package_state(
+                backend,
                 &packages,
                 device,
                 user,
@@ -210,6 +246,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dry_run,
         } => {
             commands::change_package_state(
+                backend,
                 &packages,
                 device,
                 user,
@@ -223,16 +260,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             device,
             user,
         } => {
-            commands::show_package_info(&package, device, user)?;
+            commands::show_package_info(backend, &package, device, user)?;
         }
         Commands::Update => {
             commands::update_lists()?;
+        }
+        Commands::Adb => {
+            commands::show_adb_info(backend)?;
         }
         Commands::Completions { shell } => {
             commands::generate_completions(shell);
         }
         Commands::Repl { device, user } => {
-            repl::repl_mode(device, user)?;
+            repl::repl_mode(backend, device, user)?;
         }
     }
 
