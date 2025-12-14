@@ -15,6 +15,11 @@
     {
       formatter = forSystems (pkgs: pkgs.nixfmt-tree);
 
+      packages = forSystems (pkgs: {
+        uad-ng = pkgs.callPackage ./package.nix { };
+        uad-ng-windows = pkgs.pkgsCross.mingwW64.callPackage ./package.nix { };
+      });
+
       devShells = forSystems (
         pkgs:
         let
