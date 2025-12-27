@@ -6,8 +6,8 @@
 )]
 use crate::core::theme::{ColorPalette, Theme};
 use iced::widget::{
-    button, checkbox, container, overlay, pick_list, radio, scrollable, text, text_editor,
-    text_input,
+    button, checkbox, container, overlay, pick_list, radio, scrollable, text,
+    text_editor, text_input,
 };
 use iced::{Background, Border, Color, Shadow};
 
@@ -505,6 +505,31 @@ pub mod Button {
             shadow: Shadow::default(),
             snap: true,
         }
+    }
+
+    /// Link-like button: transparent background, colored text.
+    pub fn Link(theme: &Theme, status: button::Status) -> button::Style {
+        let p = theme.palette();
+        let mut style = button::Style {
+            background: Some(Background::Color(Color::TRANSPARENT)),
+            text_color: p.bright.primary,
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: 4.0.into(),
+            },
+            shadow: Shadow::default(),
+            snap: true,
+        };
+
+        if matches!(status, button::Status::Hovered) {
+            style.background = Some(Background::Color(Color {
+                a: 0.10,
+                ..p.normal.primary
+            }));
+        }
+
+        style
     }
 
     #[allow(dead_code, reason = "Used in views where buttons must be invisible")]

@@ -5,12 +5,15 @@ use crate::core::theme::Theme;
 use crate::core::uad_lists::{
     Opposite, PackageHashMap, PackageState, Removal, UadList, UadListState, load_debloat_lists,
 };
-use crate::core::utils::{EXPORT_FILE_NAME, NAME, export_selection, fetch_packages, open_url};
+use crate::core::utils::{
+    EXPORT_FILE_NAME, NAME, export_selection, fetch_packages, open_url, string_to_theme,
+};
 use crate::gui::style;
 use crate::gui::widgets::navigation_menu::ICONS;
 use std::path::PathBuf;
 
 use crate::gui::views::settings::Settings;
+use crate::gui::widgets::description::{DescriptionContent, url_to_path};
 use crate::gui::widgets::modal::Modal;
 use crate::gui::widgets::package_row::{Message as RowMessage, PackageRow};
 use crate::gui::widgets::text;
@@ -58,8 +61,8 @@ pub struct List {
     pub selected_user: Option<User>,
     all_selected: bool,
     pub input_value: String,
-    description: String,
-    description_content: text_editor::Content,
+    /// Parsed description content with clickable links (cached to avoid re-parsing)
+    description_content: DescriptionContent,
     selection_modal: bool,
     error_modal: Option<String>,
     export_modal: bool,
@@ -340,9 +343,40 @@ impl List {
             .height(Length::FillPortion(6))
             .style(style::Scrollable::Packages);
 
-        let description_scroll =
-            scrollable(text_editor(&self.description_content).on_action(Message::DescriptionEdit))
-                .style(style::Scrollable::Description);
+        let app_theme = string_to_theme(&settings.general.theme);
+
+        let links_bar: Element<'_, Message, Theme, Renderer> =
+            if self.description_content.links().is_empty() {
+                Space::new().height(Length::Shrink).into()
+            } else {
+                let links = self
+                    .description_content
+                    .links()
+                    .iter()
+                    .take(20) // avoid absurdly large rows; URLs are still visible in the editor
+                    .fold(row![].spacing(6), |row, url| {
+                        row.push(
+                            button(text(url).style(style::Text::Color(
+                                app_theme.palette().bright.primary,
+                            )))
+                            .padding([2, 8])
+                            .on_press(Message::GoToUrl(url_to_path(url)))
+                            .style(style::Button::Link),
+                        )
+                    });
+
+                scrollable(links)
+                    .direction(Direction::Horizontal(Scrollbar::default()))
+                    .height(Length::Shrink)
+                    .style(style::Scrollable::Description)
+                    .into()
+            };
+
+        // Read-only editor: selectable text + copy, no edits.
+        let description_scroll = scrollable(
+            text_editor(self.description_content.content()).on_action(Message::DescriptionEdit),
+        )
+        .style(style::Scrollable::Description);
 
         let description_panel = container(description_scroll)
             .padding(6)
@@ -445,6 +479,7 @@ impl List {
                 control_panel,
                 notifications_area,
                 packages_scrollable,
+                links_bar,
                 description_panel,
                 action_row,
             ]
@@ -997,8 +1032,8 @@ impl List {
                 ))
             }
             RowMessage::PackagePressed => {
-                self.description = package.clone().description;
-                self.description_content = text_editor::Content::with_text(&package.description);
+                // Snapshot description once on selection (links + editor content).
+                self.description_content = DescriptionContent::parse(&package.description);
                 package.current = true;
                 if self.current_package_index != i_package {
                     self.phone_packages[i_user][self.current_package_index].current = false;
@@ -1007,6 +1042,14 @@ impl List {
                 Task::none()
             }
         }
+    }
+
+    fn on_description_edit(&mut self, action: text_editor::Action) -> Task<Message> {
+        // Keep the editor selectable/copiable, but do not allow edits.
+        if !matches!(action, text_editor::Action::Edit(_)) {
+            self.description_content.perform(action);
+        }
+        Task::none()
     }
 
     fn on_apply_action_on_selection(&mut self) -> Task<Message> {
@@ -1202,16 +1245,6 @@ impl List {
         match export {
             Ok(_) => self.export_modal = true,
             Err(err) => error!("Failed to export current selection: {err:?}"),
-        }
-        Task::none()
-    }
-
-    fn on_description_edit(&mut self, action: text_editor::Action) -> Task<Message> {
-        match action {
-            text_editor::Action::Scroll { lines: _ } | text_editor::Action::Edit(_) => {}
-            _ => {
-                self.description_content.perform(action);
-            }
         }
         Task::none()
     }
