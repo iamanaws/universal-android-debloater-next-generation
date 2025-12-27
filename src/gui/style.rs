@@ -6,10 +6,32 @@
 )]
 use crate::core::theme::{ColorPalette, Theme};
 use iced::widget::{
-    button, checkbox, container, overlay, pick_list, radio, scrollable, text, text_editor,
-    text_input,
+    button, checkbox, container, markdown, overlay, pick_list, radio, scrollable, table, text,
+    text_editor, text_input,
 };
 use iced::{Background, Border, Color, Shadow};
+
+/// Markdown settings for package descriptions.
+///
+/// - **Link color**: matches the selected-row package name color (`palette().bright.primary`).
+pub fn description_markdown_settings(theme: &Theme) -> markdown::Settings {
+    let p = theme.palette();
+
+    // Build an Iced palette directly from our custom theme palette.
+    let iced_palette = iced::theme::Palette {
+        background: p.base.background,
+        text: p.bright.surface,
+        primary: p.normal.primary,
+        success: p.bright.secondary,
+        warning: p.normal.surface,
+        danger: p.normal.error,
+    };
+
+    let mut style = markdown::Style::from_palette(iced_palette);
+    style.link_color = p.bright.primary;
+
+    markdown::Settings::with_style(style)
+}
 
 // Implement theming catalogs for our custom `Theme` so generic widgets
 // like `Button<'_, Message, Theme, Renderer>` compile under iced 0.13.
@@ -83,6 +105,45 @@ impl text::Catalog for Theme {
 
     fn style(&self, class: &<Self as text::Catalog>::Class<'_>) -> text::Style {
         (class)(self)
+    }
+}
+
+impl table::Catalog for Theme {
+    type Class<'a> = table::StyleFn<'a, Theme>;
+
+    fn default<'a>() -> <Self as table::Catalog>::Class<'a> {
+        Box::new(|t: &Theme| {
+            let p = t.palette();
+            let separator: Background = p.base.background.into();
+
+            table::Style {
+                separator_x: separator,
+                separator_y: separator,
+            }
+        })
+    }
+
+    fn style(&self, class: &<Self as table::Catalog>::Class<'_>) -> table::Style {
+        class(self)
+    }
+}
+
+impl markdown::Catalog for Theme {
+    fn code_block<'a>() -> <Self as container::Catalog>::Class<'a> {
+        Box::new(|t: &Theme| {
+            let p = t.palette();
+            container::Style {
+                background: Some(Background::Color(p.base.foreground)),
+                text_color: Some(p.bright.surface),
+                border: Border {
+                    color: Color::TRANSPARENT,
+                    width: 0.0,
+                    radius: 4.0.into(),
+                },
+                shadow: Shadow::default(),
+                snap: true,
+            }
+        })
     }
 }
 
