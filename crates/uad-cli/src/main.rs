@@ -25,6 +25,7 @@ use filters::{ListFilter, RemovalFilter, StateFilter};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum AdbBackendArg {
     /// Built-in ADB implementation (no external dependencies)
+    #[cfg(feature = "builtin-adb")]
     Builtin,
     /// Use system-installed adb binary
     System,
@@ -33,6 +34,7 @@ pub enum AdbBackendArg {
 impl From<AdbBackendArg> for AdbBackend {
     fn from(arg: AdbBackendArg) -> Self {
         match arg {
+            #[cfg(feature = "builtin-adb")]
             AdbBackendArg::Builtin => AdbBackend::Builtin,
             AdbBackendArg::System => AdbBackend::System,
         }
@@ -45,7 +47,7 @@ impl From<AdbBackendArg> for AdbBackend {
 #[command(version)]
 #[command(propagate_version = true)]
 pub struct Cli {
-    /// ADB backend to use: system (default, uses adb binary) or builtin (no dependencies)
+    /// ADB backend to use: system (default, uses adb binary) or builtin if enabled
     #[arg(
         short = 'B',
         long = "backend",
